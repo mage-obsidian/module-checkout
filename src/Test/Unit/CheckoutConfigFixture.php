@@ -31,6 +31,8 @@ use MageObsidian\Checkout\Model\Payment\MethodData;
 use MageObsidian\Checkout\Model\Shell\Gate;
 use MageObsidian\Checkout\ViewModel\CartItems;
 use MageObsidian\Checkout\ViewModel\CheckoutConfig;
+use MageObsidian\Checkout\ViewModel\TaxDisplay;
+use MageObsidian\Customer\ViewModel\FormAttributes;
 use MageObsidian\ModernFrontend\Model\Config\ConfigProvider;
 use MageObsidian\Storefront\ViewModel\ReCaptcha;
 
@@ -54,7 +56,8 @@ trait CheckoutConfigFixture
         ?string $defaultShippingId = null,
         array $quoteShipping = [],
         array $reCaptchaConfig = [],
-        array $paymentConfig = []
+        array $paymentConfig = [],
+        array $addressFields = []
     ): CheckoutConfig {
         $quote = $this->getMockBuilder(Quote::class)
             ->disableOriginalConstructor()
@@ -143,7 +146,15 @@ trait CheckoutConfigFixture
         $gate->method('isCacheable')->willReturn($shellCacheable);
 
         $reCaptcha = $this->createMock(ReCaptcha::class);
-        $reCaptcha->method('configFor')->willReturn($reCaptchaConfig);
+        $reCaptcha->method('configFor')->willReturnCallback(
+            static fn (string $formKey): array => ($reCaptchaConfig['formKey'] ?? null) === $formKey ? $reCaptchaConfig : []
+        );
+
+        $taxDisplay = $this->createMock(TaxDisplay::class);
+        $taxDisplay->method('getConfig')->willReturn(['price' => 'both', 'subtotal' => 'incl']);
+
+        $formAttributes = $this->createMock(FormAttributes::class);
+        $formAttributes->method('checkoutConfig')->willReturn($addressFields);
 
         return new CheckoutConfig(
             $checkoutSession,
@@ -160,7 +171,9 @@ trait CheckoutConfigFixture
             $agreementsConfigProvider,
             $methodConfig,
             $gate,
-            $reCaptcha
+            $reCaptcha,
+            $formAttributes,
+            $taxDisplay
         );
     }
 
@@ -180,6 +193,11 @@ trait CheckoutConfigFixture
         $address->method('getPostcode')->willReturn($row['postcode'] ?? '');
         $address->method('getCountryId')->willReturn($row['countryId'] ?? '');
         $address->method('getTelephone')->willReturn($row['telephone'] ?? '');
+        $address->method('getPrefix')->willReturn($row['prefix'] ?? '');
+        $address->method('getMiddlename')->willReturn($row['middlename'] ?? '');
+        $address->method('getSuffix')->willReturn($row['suffix'] ?? '');
+        $address->method('getFax')->willReturn($row['fax'] ?? '');
+        $address->method('getVatId')->willReturn($row['vatId'] ?? '');
         $address->method('getShippingMethod')->willReturn($row['method'] ?? '');
         $address->method('getEmail')->willReturn($row['addressEmail'] ?? '');
 
@@ -206,6 +224,11 @@ trait CheckoutConfigFixture
         $address->method('getPostcode')->willReturn($row['postcode'] ?? '');
         $address->method('getCountryId')->willReturn($row['countryId'] ?? '');
         $address->method('getTelephone')->willReturn($row['telephone'] ?? '');
+        $address->method('getPrefix')->willReturn($row['prefix'] ?? '');
+        $address->method('getMiddlename')->willReturn($row['middlename'] ?? '');
+        $address->method('getSuffix')->willReturn($row['suffix'] ?? '');
+        $address->method('getFax')->willReturn($row['fax'] ?? '');
+        $address->method('getVatId')->willReturn($row['vatId'] ?? '');
 
         return $address;
     }

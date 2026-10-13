@@ -20,6 +20,7 @@ use Magento\Framework\View\Element\Block\ArgumentInterface;
 use MageObsidian\Checkout\Model\Payment\MethodConfig;
 use MageObsidian\Checkout\Model\Payment\MethodData;
 use MageObsidian\Checkout\Model\Shell\Gate;
+use MageObsidian\Customer\ViewModel\FormAttributes;
 use MageObsidian\ModernFrontend\Model\Config\ConfigProvider;
 use MageObsidian\ModernFrontend\Model\Config\Source\CheckoutLayout;
 use Magento\Quote\Model\Quote;
@@ -61,6 +62,7 @@ class CheckoutConfig implements ArgumentInterface
      * The key Magento configures the place-order challenge under.
      */
     private const string RECAPTCHA_FORM = 'place_order';
+    private const string COUPON_RECAPTCHA_FORM = 'coupon_code';
 
     /**
      * @param CheckoutSession $checkoutSession
@@ -78,6 +80,8 @@ class CheckoutConfig implements ArgumentInterface
      * @param MethodConfig $methodConfig
      * @param Gate $gate
      * @param ReCaptcha $reCaptcha
+     * @param FormAttributes $formAttributes
+     * @param TaxDisplay $taxDisplay
      */
     public function __construct(
         private readonly CheckoutSession $checkoutSession,
@@ -94,7 +98,9 @@ class CheckoutConfig implements ArgumentInterface
         private readonly AgreementsConfigProvider $agreementsConfigProvider,
         private readonly MethodConfig $methodConfig,
         private readonly Gate $gate,
-        private readonly ReCaptcha $reCaptcha
+        private readonly ReCaptcha $reCaptcha,
+        private readonly FormAttributes $formAttributes,
+        private readonly TaxDisplay $taxDisplay
     ) {
     }
 
@@ -195,6 +201,9 @@ class CheckoutConfig implements ArgumentInterface
             // Store-scoped: the site key is the same for every shopper, so it
             // belongs in the half that may reach a cacheable page.
             'recaptcha' => $this->reCaptcha->configFor(self::RECAPTCHA_FORM),
+            'couponRecaptcha' => $this->reCaptcha->configFor(self::COUPON_RECAPTCHA_FORM),
+            'addressFields' => $this->formAttributes->checkoutConfig(),
+            'taxDisplay' => $this->taxDisplay->getConfig(),
         ];
     }
 
@@ -254,6 +263,11 @@ class CheckoutConfig implements ArgumentInterface
                     'postcode' => (string)$address->getPostcode(),
                     'countryId' => (string)$address->getCountryId(),
                     'telephone' => (string)$address->getTelephone(),
+                    'prefix' => (string)$address->getPrefix(),
+                    'middlename' => (string)$address->getMiddlename(),
+                    'suffix' => (string)$address->getSuffix(),
+                    'fax' => (string)$address->getFax(),
+                    'vatId' => (string)$address->getVatId(),
                 ],
                 'method' => $this->shippingMethod((string)$address->getShippingMethod()),
                 'email' => $this->quoteEmail($quote, $address),
@@ -348,6 +362,11 @@ class CheckoutConfig implements ArgumentInterface
             'postcode' => (string)$address->getPostcode(),
             'countryId' => (string)$address->getCountryId(),
             'telephone' => (string)$address->getTelephone(),
+            'prefix' => (string)$address->getPrefix(),
+            'middlename' => (string)$address->getMiddlename(),
+            'suffix' => (string)$address->getSuffix(),
+            'fax' => (string)$address->getFax(),
+            'vatId' => (string)$address->getVatId(),
         ];
     }
 
@@ -521,6 +540,7 @@ class CheckoutConfig implements ArgumentInterface
             'agreements' => ['enabled' => false, 'items' => []],
             'payment' => [],
             'recaptcha' => [],
+            'couponRecaptcha' => [],
         ];
     }
 

@@ -6,6 +6,7 @@ import { describe, it, expect, beforeEach, vi } from "vitest";
 import { mount } from "@vue/test-utils";
 import { setActivePinia, createPinia } from "pinia";
 import ShippingStep from "./ShippingStep.vue";
+import AddressForm from "MageObsidian_Storefront::form/AddressForm";
 import { useCheckout } from "MageObsidian_Checkout::js/useCheckout";
 
 const CONFIG = {
@@ -323,5 +324,151 @@ describe("ShippingStep — sending the shopper to a field the checkout is waitin
         expect(wrapper.find("[data-address-form-stub]").exists()).toBe(false);
 
         expect(() => wrapper.vm.focusMissingField("firstname")).not.toThrow();
+    });
+
+    it("hands the store's address rules to the address form", () => {
+        const pinia2 = createPinia();
+        setActivePinia(pinia2);
+        useCheckout().init({ ...CONFIG, addressFields: { optionalZipCountries: ["IE"], streetLines: 3 } });
+
+        const wrapper = mount(ShippingStep, { props: { directory: DIRECTORY }, global: { plugins: [pinia2] } });
+        const rules = wrapper.findComponent(AddressForm).props("rules");
+
+        expect(rules.optionalZipCountries).toEqual(["IE"]);
+        expect(rules.streetLines).toBe(3);
+    });
+});
+
+describe("ShippingStep — tax display", () => {
+    let pinia;
+
+    beforeEach(() => {
+        pinia = createPinia();
+        setActivePinia(pinia);
+        vi.restoreAllMocks();
+    });
+
+    function render() {
+        return mount(ShippingStep, {
+            props: { directory: DIRECTORY },
+            global: { plugins: [pinia] },
+        });
+    }
+
+    const TAXED_RATE = { ...FLATRATE, price_excl_tax: 5, price_incl_tax: 5.4 };
+
+    async function listRates(taxDisplay: Record<string, unknown>) {
+        useCheckout().init({ ...CONFIG, taxDisplay });
+        mockFetch([TAXED_RATE]);
+        const wrapper = render();
+        await wrapper.find("button").trigger("click");
+        await flush();
+        await wrapper.vm.$nextTick();
+        return wrapper;
+    }
+
+    const amounts = (wrapper: ReturnType<typeof mount>) =>
+        wrapper.findAll("[data-rate-price] [data-basis]").map((node) => [node.attributes("data-basis"), node.text()]);
+
+    it("lists the rate without tax by default", async () => {
+        expect(amounts(await listRates({}))).toEqual([["excl", "$5.00"]]);
+    });
+
+    it("lists the rate with tax when the store includes it", async () => {
+        expect(amounts(await listRates({ shipping: "incl" }))).toEqual([["incl", "$5.40"]]);
+    });
+
+    it("lists both amounts when the store asks for both", async () => {
+        const wrapper = await listRates({ shipping: "both" });
+
+        expect(amounts(wrapper)).toEqual([
+            ["excl", "$5.00"],
+            ["incl", "$5.40"],
+        ]);
+        expect(wrapper.get("[data-rate-price]").text()).toContain("Incl. Tax");
+    });
+
+    it("still calls a rate of zero free", async () => {
+        useCheckout().init({ ...CONFIG, taxDisplay: { shipping: "both" } });
+        mockFetch([{ ...FLATRATE, amount: 0, price_excl_tax: 0, price_incl_tax: 0 }]);
+        const wrapper = render();
+        await wrapper.find("button").trigger("click");
+        await flush();
+        await wrapper.vm.$nextTick();
+
+        expect(wrapper.get("[data-rate-price]").text()).toBe("Free");
+    });
+});
+
+describe("ShippingStep — carrier renderers", () => {
+    const PICKUP = { carrier_code: "instore", method_code: "pickup", carrier_title: "Pick in Store", method_title: "Pick in Store", amount: 0, available: true };
+    const COMPLETE = {
+        firstname: "Ada", lastname: "Lovelace", company: "", street: ["1 Rue", ""],
+        city: "Paris", region: "", regionId: null, postcode: "75001", countryId: "FR",
+        telephone: "0102030405",
+    };
+    let pinia;
+
+    beforeEach(() => {
+        pinia = createPinia();
+        setActivePinia(pinia);
+        vi.restoreAllMocks();
+    });
+
+    async function renderWithRenderer(rates: unknown[]) {
+        const checkout = useCheckout();
+        checkout.init({
+            ...CONFIG,
+            quote: { items: [{ id: 1, name: "Bag", sku: "24-MB01" }], subtotal: "", grandTotal: "" },
+            shippingRenderers: { instore: { component: "https://shop.test/finder.js", config: {} } },
+        });
+        Object.assign(checkout.shippingAddress, COMPLETE);
+        mockFetch(rates);
+        await checkout.estimateShipping();
+        const wrapper = mount(ShippingStep, {
+            props: { directory: DIRECTORY },
+            global: {
+                plugins: [pinia],
+                stubs: { ShippingCarrierRenderer: { template: "<div data-carrier-stub><slot /></div>", props: ["code"] } },
+            },
+        });
+        return { wrapper, checkout };
+    }
+
+    it("keeps a renderer-owned carrier out of the plain method list", async () => {
+        const { wrapper } = await renderWithRenderer([PICKUP, FLATRATE]);
+
+        const radios = wrapper.findAll('input[name="shipping-method"]');
+        expect(radios).toHaveLength(1);
+        expect(radios[0].element.value).toBe("flatrate_flatrate");
+    });
+
+    it("draws the carrier renderer when the rates include that carrier", async () => {
+        const { wrapper } = await renderWithRenderer([PICKUP, FLATRATE]);
+
+        expect(wrapper.find("[data-carrier-stub]").exists()).toBe(true);
+    });
+
+    it("draws no carrier renderer when the rates leave that carrier out", async () => {
+        const { wrapper } = await renderWithRenderer([FLATRATE]);
+
+        expect(wrapper.find("[data-carrier-stub]").exists()).toBe(false);
+    });
+
+    it("hides the plain methods while the carrier owns the selection", async () => {
+        const { wrapper, checkout } = await renderWithRenderer([PICKUP, FLATRATE]);
+
+        checkout.selectMethod(PICKUP);
+        await wrapper.vm.$nextTick();
+
+        expect(wrapper.find('[role="radiogroup"]').exists()).toBe(false);
+    });
+
+    it("blocks the continue button until the carrier names its destination", async () => {
+        const { wrapper, checkout } = await renderWithRenderer([PICKUP, FLATRATE]);
+        checkout.selectMethod(PICKUP);
+        await wrapper.vm.$nextTick();
+
+        expect(wrapper.find(".checkout-cta").attributes("disabled")).toBeDefined();
     });
 });

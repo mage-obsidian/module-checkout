@@ -6,8 +6,11 @@
 -->
 <script setup lang="ts">
 import { computed, ref } from "vue";
-import { useCheckout } from "MageObsidian_Checkout::js/useCheckout";
+import { useCheckout, type ShippingMethod } from "MageObsidian_Checkout::js/useCheckout";
+import { basisLabel, rateAmounts, type TaxBasis } from "MageObsidian_Checkout::js/tax-display";
 import AddressForm from "MageObsidian_Storefront::form/AddressForm";
+import SavedAddressPicker from "MageObsidian_Checkout::checkout/SavedAddressPicker";
+import ShippingCarrierRenderer from "MageObsidian_Checkout::checkout/ShippingCarrierRenderer";
 import type { RegionData } from "MageObsidian_Storefront::js/address";
 import { formatCurrency } from "MageObsidian_Storefront::js/currency";
 
@@ -36,6 +39,8 @@ interface ShippingLabels {
     ratesSaving?: string;
     ratesReady?: string;
     saveAddress?: string;
+    exclTax?: string;
+    inclTax?: string;
     free?: string;
     continue?: string;
     loading?: string;
@@ -101,13 +106,39 @@ function focusMissingField(field: string): void {
 defineExpose({ focusMissingField });
 
 function formatPrice(amount: number): string {
-    if (!amount) {
-        return t("free", "Free");
-    }
     return formatCurrency(checkout.currencyFormat, amount);
 }
 
+const rateEntries = (method: ShippingMethod) => rateAmounts(method, checkout.taxDisplay.shipping);
+const rateIsFree = (method: ShippingMethod): boolean => rateEntries(method).every((entry) => !entry.amount);
+const rateBasisLabel = (basis: TaxBasis): string =>
+    basisLabel(basis, { exclTax: props.labels?.exclTax, inclTax: props.labels?.inclTax });
+
 const hasMethods = computed(() => checkout.shippingMethods.length > 0);
+const listedMethods = computed(() => checkout.shippingMethods.filter((method) => !checkout.carrierOwned(method.carrier_code)));
+const carrierRenderers = computed(() =>
+    Object.entries(checkout.shippingRenderers)
+        .map(([code, descriptor]) => ({
+            code,
+            descriptor,
+            methods: checkout.shippingMethods.filter((method) => method.carrier_code === code),
+        }))
+        .filter((entry) => entry.methods.length > 0),
+);
+const takenOverBy = computed(() => {
+    const code = checkout.selectedMethod?.carrier_code ?? "";
+    return checkout.carrierOwned(code) ? code : "";
+});
+const cartSkus = computed(() =>
+    checkout.items.map((item) => item.sku ?? "").filter((sku) => sku !== ""),
+);
+
+function leaveCarrier(): void {
+    const fallback = listedMethods.value[0];
+    if (fallback) {
+        checkout.selectMethod(fallback);
+    }
+}
 const waitingForAddress = computed(() => !checkout.ratesRequested && !checkout.loadingRates);
 const noRatesFound = computed(
     () => checkout.ratesRequested && !checkout.loadingRates && !hasMethods.value && checkout.error === "",
@@ -132,29 +163,16 @@ async function toPayment(): Promise<void> {
             <h3 id="shipping-address-heading" class="mb-5 font-mono text-xs uppercase tracking-label text-ink-soft">
                 {{ t("addressHeading", "Shipping address") }}
             </h3>
-            <div
+            <SavedAddressPicker
                 v-if="checkout.savedAddresses.length > 0"
                 data-saved-addresses
-                class="mb-6 flex flex-col gap-3"
-                role="radiogroup"
-                :aria-label="t('savedAddress', 'Ship to')"
-            >
-                <label
-                    v-for="option in addressOptions"
-                    :key="option.value"
-                    class="field-radio-card field-radio"
-                >
-                    <input
-                        type="radio"
-                        name="checkout-saved-address"
-                        class="field-radio__input"
-                        :value="option.value"
-                        :checked="currentAddressValue === option.value"
-                        @change="pickAddress(option.value)"
-                    >
-                    <span class="field-radio__label">{{ option.label }}</span>
-                </label>
-            </div>
+                class="mb-6"
+                name="checkout-saved-address"
+                :legend="t('savedAddress', 'Ship to')"
+                :options="addressOptions"
+                :current="currentAddressValue"
+                @pick="pickAddress"
+            />
 
             <div v-if="showAddressForm" data-address-fields class="flex flex-col gap-5">
                 <AddressForm
@@ -166,6 +184,7 @@ async function toPayment(): Promise<void> {
                     :display-all-regions="directory.displayAllRegions"
                     :labels="addressLabels"
                     :invalid-fields="invalidFields"
+                    :rules="checkout.addressRules"
                 />
                 <label v-if="checkout.canSaveAddress" class="field-check" data-save-address>
                     <input v-model="checkout.saveAddress" type="checkbox" class="field-check__input">
@@ -209,8 +228,26 @@ async function toPayment(): Promise<void> {
                 </p>
             </div>
 
-            <div v-if="hasMethods" class="mt-4 flex flex-col gap-3" role="radiogroup" :aria-label="t('methodsHeading', 'Shipping method')">
-                <div v-for="method in checkout.shippingMethods" :key="`${method.carrier_code}_${method.method_code}`">
+            <ShippingCarrierRenderer
+                v-for="entry in carrierRenderers"
+                :key="entry.code"
+                class="mt-4"
+                :data-carrier-renderer="entry.code"
+                :code="entry.code"
+                :component="entry.descriptor.component"
+                :methods="entry.methods"
+                :selected="takenOverBy === entry.code"
+                :config="entry.descriptor.config"
+                :address="checkout.shippingAddress"
+                :skus="cartSkus"
+                @select="checkout.selectMethod"
+                @deselect="leaveCarrier"
+                @destination="checkout.setCarrierDestination"
+                @failed="checkout.withdrawShippingRenderer"
+            />
+
+            <div v-if="listedMethods.length > 0 && takenOverBy === ''" class="mt-4 flex flex-col gap-3" role="radiogroup" :aria-label="t('methodsHeading', 'Shipping method')">
+                <div v-for="method in listedMethods" :key="`${method.carrier_code}_${method.method_code}`">
                     <label
                         class="field-radio-card flex flex-wrap items-center justify-between gap-x-4 gap-y-1"
                     >
@@ -227,7 +264,14 @@ async function toPayment(): Promise<void> {
                                 {{ method.carrier_title }}<span v-if="method.method_title"> — {{ method.method_title }}</span>
                             </span>
                         </span>
-                        <span class="font-mono text-sm text-ink">{{ formatPrice(method.amount ?? 0) }}</span>
+                        <span class="flex flex-col items-end font-mono text-sm text-ink" data-rate-price>
+                            <template v-if="rateIsFree(method)">{{ t("free", "Free") }}</template>
+                            <template v-else>
+                                <span v-for="entry in rateEntries(method)" :key="entry.basis">
+                                    <span v-if="rateEntries(method).length > 1" class="text-xs text-ash-500">{{ rateBasisLabel(entry.basis) }}: </span><span :data-basis="entry.basis">{{ formatPrice(entry.amount) }}</span>
+                                </span>
+                            </template>
+                        </span>
                     </label>
                 </div>
             </div>
@@ -235,7 +279,7 @@ async function toPayment(): Promise<void> {
             <button
                 v-if="!hideAdvance && hasMethods"
                 type="button"
-                :disabled="checkout.savingShipping || !checkout.selectedMethod"
+                :disabled="checkout.savingShipping || !checkout.selectedMethod || checkout.destinationPending"
                 :class="['checkout-cta btn btn--solid btn--lg btn--block mt-8 lg:w-fit', checkout.savingShipping && 'is-loading']"
                 @click="toPayment"
             >

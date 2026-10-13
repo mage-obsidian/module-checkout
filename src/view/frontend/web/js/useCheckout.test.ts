@@ -235,6 +235,38 @@ describe("useCheckout — payment, coupon and order", () => {
         expect(checkout.grandTotal).toBe("$54.00");
     });
 
+    it("sends the coupon challenge token in the header the platform reads", async () => {
+        setToken("coupon-token");
+        const fetchMock = mockFetch({ grand_total: 54, total_segments: [] });
+        const checkout = ready();
+
+        await checkout.applyCoupon("SAVE10");
+
+        const put = fetchMock.mock.calls.find(([, init]) => init.method === "PUT");
+        expect(put[1].headers["X-ReCaptcha"]).toBe("coupon-token");
+    });
+
+    it("sends no challenge header with a coupon when the store configured none", async () => {
+        const fetchMock = mockFetch({ grand_total: 54, total_segments: [] });
+        const checkout = ready();
+
+        await checkout.applyCoupon("SAVE10");
+
+        const put = fetchMock.mock.calls.find(([, init]) => init.method === "PUT");
+        expect(put[1].headers).not.toHaveProperty("X-ReCaptcha");
+    });
+
+    it("asks for a fresh coupon challenge after every attempt, since a token is good for one", async () => {
+        const fetchMock = mockFetch({ grand_total: 54, total_segments: [] });
+        const checkout = ready();
+
+        await checkout.applyCoupon("SAVE10");
+
+        expect(fetchMock).toHaveBeenCalled();
+        const { resets } = await import("MageObsidian_Storefront::js/recaptcha");
+        expect(resets).toContain("coupon_code");
+    });
+
     it("assigns the chosen method to the cart so the summary can show what it changed", async () => {
         const fetchMock = mockFetch({
             grand_total: 37,
@@ -409,6 +441,36 @@ describe("useCheckout — payment, coupon and order", () => {
         expect(JSON.parse(fetchMock.mock.calls[0][1].body).paymentMethod).toEqual({
             method: "checkmo",
             additional_data: { reference: "REF-1" },
+        });
+    });
+
+    it("sends a purchase order number as a field of the payment, not as additional data", async () => {
+        Object.defineProperty(window, "location", { value: { assign: vi.fn() }, writable: true });
+        const fetchMock = mockFetch(737373);
+        const checkout = ready();
+        checkout.selectPayment("purchaseorder");
+        checkout.declareMethodState("purchaseorder", { data: { po_number: "PO-1234", reference: "REF-9" } });
+
+        expect(await checkout.placeOrder()).toBe(737373);
+        expect(JSON.parse(fetchMock.mock.calls[0][1].body).paymentMethod).toEqual({
+            method: "purchaseorder",
+            po_number: "PO-1234",
+            additional_data: { reference: "REF-9" },
+        });
+    });
+
+    it("leaves additional data out when the purchase order number is all there is", async () => {
+        Object.defineProperty(window, "location", { value: { assign: vi.fn() }, writable: true });
+        const fetchMock = mockFetch(747474);
+        const checkout = ready();
+        checkout.selectPayment("purchaseorder");
+        checkout.declareMethodState("purchaseorder", { data: { po_number: "PO-1234" } });
+
+        await checkout.placeOrder();
+
+        expect(JSON.parse(fetchMock.mock.calls[0][1].body).paymentMethod).toEqual({
+            method: "purchaseorder",
+            po_number: "PO-1234",
         });
     });
 
@@ -1335,5 +1397,365 @@ describe("useCheckout — an address that stops being complete after the payment
 
         expect(checkout.paymentMethods).toEqual([]);
         expect(checkout.methodState).toEqual({});
+    });
+});
+
+describe("useCheckout — the address rules the store configures", () => {
+    const IRELAND = { countryId: "IE", postcode: "", region: "", regionId: null };
+
+    beforeEach(() => {
+        setActivePinia(createPinia());
+    });
+
+    function seeded(addressFields: Record<string, unknown> = {}, overrides = {}) {
+        const checkout = useCheckout();
+        checkout.init({ ...GUEST_CONFIG, statesRequired: ["US"], addressFields });
+        Object.assign(checkout.shippingAddress, overrides);
+        return checkout;
+    }
+
+    it("quotes an address without a postcode where the country is declared optional", () => {
+        const checkout = seeded({ optionalZipCountries: ["IE"] }, IRELAND);
+
+        expect(checkout.rateReady).toBe(true);
+    });
+
+    it("still waits for a postcode where the country is not declared optional", () => {
+        const checkout = seeded({ optionalZipCountries: ["IE"] }, { ...IRELAND, countryId: "FR" });
+
+        expect(checkout.rateReady).toBe(false);
+    });
+
+    it("keeps waiting for a postcode when the store declares no optional country", () => {
+        expect(seeded({}, IRELAND).rateReady).toBe(false);
+    });
+
+    it("does not list the postcode as missing in an optional-postcode country", () => {
+        const checkout = seeded({ optionalZipCountries: ["IE"] }, IRELAND);
+
+        expect(checkout.missingAddressFields).not.toContain("postcode");
+    });
+
+    it("does not list a telephone the store made optional as missing", () => {
+        const checkout = seeded({ fields: { telephone: { visible: true, required: false, options: [] } } });
+
+        expect(checkout.missingAddressFields).not.toContain("telephone");
+    });
+
+    it("lists a required field the store turned on, such as the VAT number", () => {
+        const checkout = seeded({ fields: { vat_id: { visible: true, required: true, options: [] } } });
+
+        expect(checkout.missingAddressFields).toContain("vatId");
+    });
+
+    it("still asks for a telephone when the store says nothing about it", () => {
+        expect(seeded().missingAddressFields).toContain("telephone");
+    });
+
+    it("seeds as many blank street lines as the store configures", () => {
+        const checkout = seeded({ streetLines: 3 });
+
+        expect(checkout.shippingAddress.street).toEqual(["", "", ""]);
+        expect(checkout.billingAddress.street).toEqual(["", "", ""]);
+    });
+
+    it("exposes the normalised rules for the forms", () => {
+        const checkout = seeded({ streetLines: 3, optionalZipCountries: ["IE"] });
+
+        expect(checkout.addressRules.streetLines).toBe(3);
+        expect(checkout.addressRules.optionalZipCountries).toEqual(["IE"]);
+        expect(checkout.addressRules.fields.telephone.required).toBe(true);
+    });
+
+    it("carries the optional name fields of a saved address into the form", () => {
+        const checkout = useCheckout();
+        checkout.init({
+            ...GUEST_CONFIG,
+            isLoggedIn: true,
+            customerEmail: "ada@shop.test",
+            addressFields: { fields: { prefix: { visible: true, required: false, options: ["Dr."] } } },
+            addresses: [
+                {
+                    id: 7, label: "Home", isDefaultShipping: true, prefix: "Dr.", firstname: "Ada", middlename: "King",
+                    lastname: "Lovelace", suffix: "FRS", company: "", street: ["1 Rue"], city: "Paris", region: "",
+                    regionId: null, postcode: "75001", countryId: "FR", telephone: "", fax: "0102", vatId: "FR1",
+                },
+            ],
+        });
+
+        expect(checkout.shippingAddress).toMatchObject({
+            prefix: "Dr.", middlename: "King", suffix: "FRS", fax: "0102", vatId: "FR1", telephone: "",
+        });
+    });
+});
+
+describe("useCheckout — billing from the saved addresses", () => {
+    const AUSTIN = {
+        id: 20, label: "Ada, 12 Baker Street, Austin", isDefaultShipping: true,
+        firstname: "Ada", lastname: "Lovelace", company: "", street: ["12 Baker Street"],
+        city: "Austin", region: "Texas", regionId: 57, postcode: "78701",
+        countryId: "US", telephone: "5125550142",
+    };
+    const MIAMI = {
+        ...AUSTIN, id: 21, label: "Ada, 440 Ocean Drive, Miami", isDefaultShipping: false,
+        street: ["440 Ocean Drive"], city: "Miami", region: "Florida", regionId: 18, postcode: "33139",
+    };
+
+    beforeEach(() => {
+        setActivePinia(createPinia());
+    });
+
+    function loggedIn() {
+        const checkout = useCheckout();
+        checkout.init({
+            ...GUEST_CONFIG,
+            isLoggedIn: true,
+            customerEmail: "ada@shop.test",
+            addresses: [AUSTIN, MIAMI],
+        });
+        return checkout;
+    }
+
+    it("starts with no saved billing address chosen", () => {
+        expect(loggedIn().selectedBillingAddressId).toBeNull();
+    });
+
+    it("copies the chosen saved address into the billing address", () => {
+        const checkout = loggedIn();
+
+        checkout.selectBillingAddress(21);
+
+        expect(checkout.selectedBillingAddressId).toBe(21);
+        expect(checkout.billingAddress).toMatchObject({ city: "Miami", postcode: "33139", regionId: 18 });
+    });
+
+    it("does not touch the shipping address while billing is chosen", () => {
+        const checkout = loggedIn();
+
+        checkout.selectBillingAddress(21);
+
+        expect(checkout.shippingAddress.postcode).toBe("78701");
+    });
+
+    it("goes back to a blank billing address for a new one", () => {
+        const checkout = loggedIn();
+        checkout.selectBillingAddress(21);
+
+        checkout.selectBillingAddress(null);
+
+        expect(checkout.selectedBillingAddressId).toBeNull();
+        expect(checkout.billingAddress.postcode).toBe("");
+        expect(checkout.billingAddress.countryId).toBe("US");
+    });
+
+    it("treats an unknown id as a new address", () => {
+        const checkout = loggedIn();
+
+        checkout.selectBillingAddress(999);
+
+        expect(checkout.selectedBillingAddressId).toBeNull();
+    });
+
+    it("bills the order to the saved address that was chosen", async () => {
+        Object.defineProperty(window, "location", { value: { assign: vi.fn() }, writable: true });
+        const fetchMock = mockFetch(757575);
+        const checkout = loggedIn();
+        checkout.selectPayment("checkmo");
+        checkout.sameAsShipping = false;
+        checkout.selectBillingAddress(21);
+
+        await checkout.placeOrder();
+
+        expect(JSON.parse(fetchMock.mock.calls[0][1].body).billingAddress).toMatchObject({
+            city: "Miami",
+            postcode: "33139",
+        });
+    });
+
+    it("names the saved address on the order so it stays linked to the address book", async () => {
+        Object.defineProperty(window, "location", { value: { assign: vi.fn() }, writable: true });
+        const fetchMock = mockFetch(757575);
+        const checkout = loggedIn();
+        checkout.selectPayment("checkmo");
+        checkout.sameAsShipping = false;
+        checkout.selectBillingAddress(21);
+
+        await checkout.placeOrder();
+
+        expect(JSON.parse(fetchMock.mock.calls[0][1].body).billingAddress.customer_address_id).toBe(21);
+    });
+
+    it("names no saved address when the billing address was typed in", async () => {
+        Object.defineProperty(window, "location", { value: { assign: vi.fn() }, writable: true });
+        const fetchMock = mockFetch(757575);
+        const checkout = loggedIn();
+        checkout.selectPayment("checkmo");
+        checkout.sameAsShipping = false;
+        checkout.selectBillingAddress(null);
+        Object.assign(checkout.billingAddress, { firstname: "Ada", lastname: "L", street: ["1 Way"], city: "Austin", postcode: "78701", countryId: "US", regionId: 57, region: "Texas", telephone: "5125550142" });
+
+        await checkout.placeOrder();
+
+        expect(JSON.parse(fetchMock.mock.calls[0][1].body).billingAddress).not.toHaveProperty("customer_address_id");
+    });
+
+    it("does not place the order when the saved billing address lacks a field the store now requires", async () => {
+        Object.defineProperty(window, "location", { value: { assign: vi.fn() }, writable: true });
+        const fetchMock = mockFetch(757575);
+        const checkout = loggedIn();
+        checkout.selectPayment("checkmo");
+        checkout.sameAsShipping = false;
+        checkout.selectBillingAddress(21);
+        checkout.billingAddress.city = "";
+
+        const orderId = await checkout.placeOrder();
+
+        expect(orderId).toBeNull();
+        expect(checkout.orderError).not.toBe("");
+        expect(fetchMock).not.toHaveBeenCalled();
+    });
+});
+
+describe("useCheckout — carrier renderers", () => {
+    const COMPLETE = {
+        firstname: "Ada", lastname: "Lovelace", company: "", street: ["1 Rue", ""],
+        city: "Paris", region: "", regionId: null, postcode: "75001", countryId: "FR",
+        telephone: "0102030405",
+    };
+    const PICKUP = { carrier_code: "instore", method_code: "pickup", carrier_title: "Pick in Store", available: true };
+    const DESTINATION = {
+        carrierCode: "instore",
+        address: { ...COMPLETE, firstname: "Austin Studio", lastname: "Store", postcode: "78701", countryId: "US" },
+        extensionAttributes: { pickup_location_code: "austin" },
+    };
+    const SAVE_RESPONSE = { payment_methods: [{ code: "checkmo", title: "Check" }], totals: { grand_total: 39 } };
+
+    beforeEach(() => {
+        setActivePinia(createPinia());
+        vi.restoreAllMocks();
+    });
+
+    function ready() {
+        const checkout = useCheckout();
+        checkout.init({
+            ...GUEST_CONFIG,
+            shippingRenderers: { instore: { component: "https://shop.test/pickup.js", config: { radius: 200 } } },
+        });
+        checkout.email = "ada@shop.test";
+        Object.assign(checkout.shippingAddress, COMPLETE);
+        return checkout;
+    }
+
+    it("seeds the carrier renderers with their component and config", () => {
+        const checkout = ready();
+
+        expect(checkout.shippingRenderers).toEqual({
+            instore: { component: "https://shop.test/pickup.js", config: { radius: 200 } },
+        });
+        expect(checkout.carrierOwned("instore")).toBe(true);
+        expect(checkout.carrierOwned("flatrate")).toBe(false);
+    });
+
+    it("ignores a carrier descriptor without a component", () => {
+        const checkout = useCheckout();
+        checkout.initPublic({ shippingRenderers: { instore: { component: " " }, acme: "nonsense" } });
+
+        expect(checkout.shippingRenderers).toEqual({});
+    });
+
+    it("does not preselect a carrier that has its own renderer", async () => {
+        const checkout = ready();
+        mockFetch([PICKUP, FLATRATE]);
+
+        await checkout.estimateShipping();
+
+        expect(checkout.selectedMethod?.carrier_code).toBe("flatrate");
+    });
+
+    it("holds the payment back while a carrier method is chosen without its destination", async () => {
+        const checkout = ready();
+        mockFetch([PICKUP, FLATRATE]);
+        await checkout.estimateShipping();
+
+        checkout.selectMethod(PICKUP);
+
+        expect(checkout.destinationPending).toBe(true);
+        mockFetch(SAVE_RESPONSE);
+        checkout.setCarrierDestination(DESTINATION);
+        expect(checkout.destinationPending).toBe(false);
+    });
+
+    it("saves the destination as the shipping address and keeps the shopper's address as billing", async () => {
+        const checkout = ready();
+        mockFetch([PICKUP]);
+        await checkout.estimateShipping();
+        checkout.selectMethod(PICKUP);
+        checkout.setCarrierDestination(DESTINATION);
+        const fetchMock = mockFetch(SAVE_RESPONSE);
+
+        await checkout.saveShipping();
+
+        const body = JSON.parse(fetchMock.mock.calls[0][1].body).addressInformation;
+        expect(body.shipping_carrier_code).toBe("instore");
+        expect(body.shipping_method_code).toBe("pickup");
+        expect(body.shipping_address.postcode).toBe("78701");
+        expect(body.shipping_address.extension_attributes).toEqual({ pickup_location_code: "austin" });
+        expect(body.billing_address.postcode).toBe("75001");
+        expect(body.billing_address.extension_attributes).toBeUndefined();
+    });
+
+    it("drops the destination when another carrier is chosen", async () => {
+        const checkout = ready();
+        mockFetch([PICKUP, FLATRATE]);
+        await checkout.estimateShipping();
+        checkout.selectMethod(PICKUP);
+        checkout.setCarrierDestination(DESTINATION);
+
+        checkout.selectMethod(FLATRATE);
+
+        expect(checkout.carrierDestination).toBeNull();
+    });
+
+    it("takes the payment methods down when the shopper switches to a carrier needing a destination", async () => {
+        const checkout = ready();
+        mockFetch([PICKUP, FLATRATE]);
+        await checkout.estimateShipping();
+        mockFetch(SAVE_RESPONSE);
+        await checkout.saveShipping();
+        expect(checkout.paymentMethods).toHaveLength(1);
+
+        checkout.selectMethod(PICKUP);
+        await nextTick();
+
+        expect(checkout.paymentMethods).toEqual([]);
+    });
+
+    it("does not restore a quote that was shipping through a carrier renderer", () => {
+        const checkout = useCheckout();
+        checkout.initPublic({ shippingRenderers: { instore: { component: "https://shop.test/pickup.js" } } });
+        checkout.applyPrivate({
+            ...GUEST_CONFIG,
+            shipping: {
+                address: { ...COMPLETE, street: ["900 Store Row"] },
+                method: { carrier_code: "instore", method_code: "pickup" },
+                email: "ada@shop.test",
+            },
+        });
+
+        expect(checkout.shippingAddress.street[0]).toBe("");
+        expect(checkout.selectedMethod).toBeNull();
+    });
+
+    it("withdraws a renderer that failed and lists its methods no more", async () => {
+        const checkout = ready();
+        mockFetch([PICKUP, FLATRATE]);
+        await checkout.estimateShipping();
+        checkout.selectMethod(PICKUP);
+
+        checkout.withdrawShippingRenderer("instore");
+
+        expect(checkout.shippingRenderers).toEqual({});
+        expect(checkout.shippingMethods.map((m) => m.carrier_code)).toEqual(["flatrate"]);
+        expect(checkout.selectedMethod?.carrier_code).toBe("flatrate");
     });
 });
